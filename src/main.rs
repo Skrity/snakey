@@ -2,6 +2,10 @@ use std::collections::VecDeque;
 use rand::{thread_rng, Rng};
 use std::env::args;
 
+// TODO: spawn more food later on in the game
+// TODO: detect collision with whole body
+// TODO: fix food spawning inside snake
+
 fn main() {
     let cmdline: Vec<String> = args().collect();
     let mut x = match cmdline.len() {
@@ -53,15 +57,39 @@ struct Field {
 #[derive(Default, Clone, Copy, PartialEq)]
 struct Point (u32, u32);
 
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+enum SnakeTexture {
+    #[default]
+    Horizontal,
+    Vertical,
+    DownAndLeft,
+    UpAndLeft,
+    DownAndRight,
+    UpAndRight
+}
+
+impl From<SnakeTexture> for char {
+    fn from(item: SnakeTexture) -> char {
+        match item {
+            SnakeTexture::Horizontal => '\u{2501}',
+            SnakeTexture::Vertical => '\u{2503}',
+            SnakeTexture::DownAndLeft => '\u{250F}',
+            SnakeTexture::UpAndLeft => '\u{2513}',
+            SnakeTexture::DownAndRight => '\u{2517}',
+            SnakeTexture::UpAndRight => '\u{251B}',
+        }
+    }
+}
 #[derive(Default)]
 struct Snake {
-    points: VecDeque<Point>,
+    points: VecDeque<(Point, SnakeTexture)>,
     direction: SnakeDirection,
+    prev_direction: SnakeDirection,
     wrapped: bool
 }
 
 
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Clone, Copy)]
 enum SnakeDirection {
     #[default]
     Up,
@@ -79,6 +107,19 @@ impl SnakeDirection {
             SnakeDirection::Right => SnakeDirection::Left,
         }
     }
+    fn get_texture(&self, next: &Self) -> SnakeTexture {
+        match (self, next) {
+            (SnakeDirection::Up, SnakeDirection::Left) | (SnakeDirection::Right, SnakeDirection::Down) => SnakeTexture::UpAndLeft,
+            (SnakeDirection::Down, SnakeDirection::Left) | (SnakeDirection::Right, SnakeDirection::Up) => SnakeTexture::UpAndRight,
+            (SnakeDirection::Up, SnakeDirection::Right) | (SnakeDirection::Left, SnakeDirection::Down) => SnakeTexture::DownAndLeft,
+            (SnakeDirection::Down, SnakeDirection::Right) | (SnakeDirection::Left, SnakeDirection::Up) => SnakeTexture::DownAndRight,
+            (SnakeDirection::Up, SnakeDirection::Up) | (SnakeDirection::Down, SnakeDirection::Down) => SnakeTexture::Vertical,
+            (SnakeDirection::Left, SnakeDirection::Left) | (SnakeDirection::Right, SnakeDirection::Right) => SnakeTexture::Horizontal,
+
+            (SnakeDirection::Up, SnakeDirection::Down) | (SnakeDirection::Right, SnakeDirection::Left) |
+            (SnakeDirection::Down, SnakeDirection::Up) | (SnakeDirection::Left, SnakeDirection::Right) => unreachable!(),
+        }
+    }
 }
 
 impl Snake {
@@ -86,12 +127,13 @@ impl Snake {
         let mut me = Self {
             points: VecDeque::new(),
             direction: SnakeDirection::Down,
+            prev_direction: SnakeDirection::Down,
             wrapped: false
         };
-        me.points.push_front(Point(0,0));
-        me.points.push_front(Point(0,1));
-        me.points.push_front(Point(0,2));
-        me.points.push_front(Point(0,3));
+        me.points.push_front((Point(0,0), SnakeTexture::Vertical));
+        me.points.push_front((Point(0,1), SnakeTexture::Vertical));
+        me.points.push_front((Point(0,2), SnakeTexture::Vertical));
+        me.points.push_front((Point(0,3), SnakeTexture::Vertical));
         // Valid direction is Down
         me
     }
@@ -99,20 +141,28 @@ impl Snake {
     fn move_allowed(&mut self, direction: SnakeDirection) -> bool {
         let res = direction.reverse_direction() != self.direction;
         if res {
+            self.prev_direction = self.direction;
             self.direction = direction;
         }
         res
     }
 
     fn make_move(&mut self, constraints: (u32, u32), food: &mut Vec<Point>) {
-        let &Point(mut x,mut y) = self.points.front().unwrap();
+        let mut head = self.points.front_mut().unwrap();
+        let &mut (Point(mut x,mut y), _texture) = head;
         match self.direction {
             SnakeDirection::Down => y = wrap_inc(y, constraints.1, &mut self.wrapped),
             SnakeDirection::Up => y = wrap_dec(y, constraints.1, &mut self.wrapped),
             SnakeDirection::Left => x = wrap_dec(x, constraints.0, &mut self.wrapped),
             SnakeDirection::Right => x = wrap_inc(x, constraints.0, &mut self.wrapped),
         };
-        let res = Point(x,y);
+        let new_texture = match self.direction {
+            SnakeDirection::Down | SnakeDirection::Up => SnakeTexture::Vertical,
+            SnakeDirection::Left | SnakeDirection::Right => SnakeTexture::Horizontal,
+        };
+
+        let res = (Point(x,y), new_texture);
+        head.1 = self.prev_direction.get_texture(&self.direction);
         self.points.push_front(res);
         if !self.detect_food_collision(food) {
             self.points.pop_back();
@@ -124,7 +174,7 @@ impl Snake {
     }
 
     fn detect_food_collision(&self, food: &mut Vec<Point>) -> bool {
-        let head = self.points.front().unwrap();
+        let (head, _texture) = self.points.front().unwrap();
         for (i, f) in food.iter_mut().enumerate() {
             if head == f {
                 food.remove(i);
@@ -138,7 +188,7 @@ impl Snake {
         let &head = self.points.front().unwrap();
         let mut counter = 0;
         for &snake_point in &self.points {
-            if head == snake_point {
+            if head.0 == snake_point.0 {
                 counter += 1;
             }
             if counter > 1 {
@@ -195,11 +245,9 @@ impl Buffer {
         let offset = y*self.columns + x;
         self.buffer[offset as usize] = symbol;
     }
-    fn draw_snake(mut self, snake: &VecDeque<Point>) -> Self {
-        let mut head = true;
-        for &Point(i, j) in snake {
-            self._draw(i, j, if head { 'O' } else { 'o' });
-            head = false;
+    fn draw_snake(mut self, snake: &VecDeque<(Point, SnakeTexture)>) -> Self {
+        for &(Point(i, j), texture) in snake {
+            self._draw(i, j,  texture.into());
         }
         self
     }
@@ -216,7 +264,6 @@ impl Buffer {
         let x = &self.buffer;
         let walls = if boxed {"\u{2551}"} else {""};
         let ceiling = "\u{2550}";
-        // let bottom = ""
         let mut res = String::with_capacity(self.buffer.len()+(4*self.columns) as usize);
         if boxed {
             res.push('\u{2554}');
