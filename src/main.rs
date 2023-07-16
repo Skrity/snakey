@@ -4,10 +4,17 @@ use std::env::args;
 use std::sync::mpsc;
 use std::thread;
 
-
 // TODO: spawn more food later on in the game
 // TODO: detect collision with whole body
 // TODO: fix food spawning inside snake
+// TODO: Refactor validation and get_texture
+
+#[derive(PartialEq)]
+enum GameState {
+    Running,
+    Won,
+    Over
+}
 
 fn main() {
     let (tx, rx) = mpsc::channel();
@@ -32,20 +39,21 @@ fn main() {
         _ => {println!("Takes 0 or 3 arguments: [wrap_around] [size_x] [size_y]"); return}
     };
     x.snake = Snake::new();
-    x.food.push(Point(3, 3));
     x.print();
     println!("Controls: w, a, s, d | Field size: {}x{} | Wrap around: {}", x.size_x, x.size_y, if x.wraps {"allowed"} else {"forbidden"});
-    let mut iteration = 0;
-    loop {
-        iteration += 1;
+    let mut iteration: u32 = 0;
+    x.snake.change_direction(rx.recv().unwrap());
+    let mut running = GameState::Running;
+    while running == GameState::Running {
+        (iteration, _) = iteration.overflowing_add(1);
         if let Ok(dir) = rx.try_recv() {
             x.snake.change_direction(dir);
         }
         if iteration % 10 == 0 {
             x.snake.make_move((x.size_x, x.size_y), &mut x.food);
-            if x.snake.detect_self_collision() || (!x.wraps && x.snake.detect_wrapping()) { println!("Game over"); break }
+            if x.snake.detect_self_collision() || (!x.wraps && x.snake.detect_wrapping()) {  running = GameState::Over }
         }
-        if x.snake.points.len() == (x.size_x*x.size_y) as usize { println!("You win!"); break }
+        if x.snake.points.len() == (x.size_x*x.size_y) as usize {  running = GameState::Won }
         if x.food.is_empty() { // Put new food if no left
             x.food.push(x.find_place_for_food())
         }
@@ -55,6 +63,11 @@ fn main() {
         x.print();
         thread::sleep(std::time::Duration::from_millis(10))
     };
+    match running {
+        GameState::Running => unreachable!(),
+        GameState::Won => println!("You win!"),
+        GameState::Over => println!("Game over"),
+    }
 }
 
 #[derive(Default)]
@@ -111,25 +124,37 @@ enum SnakeDirection {
 }
 
 impl SnakeDirection {
-    fn is_valid_move(&self, rhs: &Self) -> bool {
-        *rhs != match self {
+    fn valid_move(&mut self, rhs: &Self) {
+        if rhs == &match self {
             SnakeDirection::Up => SnakeDirection::Down,
             SnakeDirection::Down => SnakeDirection::Up,
             SnakeDirection::Left => SnakeDirection::Right,
             SnakeDirection::Right => SnakeDirection::Left,
+        } {
+            *self = *rhs
         }
     }
-    fn get_texture(&self, next: &Self) -> SnakeTexture {
+    fn get_texture(&self, next: &Option<Self>) -> SnakeTexture {
         match (self, next) {
-            (SnakeDirection::Up, SnakeDirection::Left) | (SnakeDirection::Right, SnakeDirection::Down) => SnakeTexture::UpAndLeft,
-            (SnakeDirection::Down, SnakeDirection::Left) | (SnakeDirection::Right, SnakeDirection::Up) => SnakeTexture::UpAndRight,
-            (SnakeDirection::Up, SnakeDirection::Right) | (SnakeDirection::Left, SnakeDirection::Down) => SnakeTexture::DownAndLeft,
-            (SnakeDirection::Down, SnakeDirection::Right) | (SnakeDirection::Left, SnakeDirection::Up) => SnakeTexture::DownAndRight,
-            (SnakeDirection::Up, SnakeDirection::Up) | (SnakeDirection::Down, SnakeDirection::Down) => SnakeTexture::Vertical,
-            (SnakeDirection::Left, SnakeDirection::Left) | (SnakeDirection::Right, SnakeDirection::Right) => SnakeTexture::Horizontal,
+            (SnakeDirection::Up, Some(SnakeDirection::Left)) |
+            (SnakeDirection::Right, Some(SnakeDirection::Down)) => SnakeTexture::UpAndLeft,
+            (SnakeDirection::Down, Some(SnakeDirection::Left)) |
+            (SnakeDirection::Right, Some(SnakeDirection::Up)) => SnakeTexture::UpAndRight,
+            (SnakeDirection::Up, Some(SnakeDirection::Right)) |
+            (SnakeDirection::Left, Some(SnakeDirection::Down)) => SnakeTexture::DownAndLeft,
+            (SnakeDirection::Down, Some(SnakeDirection::Right)) |
+            (SnakeDirection::Left, Some(SnakeDirection::Up)) => SnakeTexture::DownAndRight,
+            (SnakeDirection::Up, Some(SnakeDirection::Up)) |
+            (SnakeDirection::Down, Some(SnakeDirection::Down)) |
+            (SnakeDirection::Down | SnakeDirection::Up, None) => SnakeTexture::Vertical,
+            (SnakeDirection::Left, Some(SnakeDirection::Left)) |
+            (SnakeDirection::Right, Some(SnakeDirection::Right)) |
+            (SnakeDirection::Left | SnakeDirection::Right, None) => SnakeTexture::Horizontal,
 
-            (SnakeDirection::Up, SnakeDirection::Down) | (SnakeDirection::Right, SnakeDirection::Left) |
-            (SnakeDirection::Down, SnakeDirection::Up) | (SnakeDirection::Left, SnakeDirection::Right) => unreachable!(),
+            (SnakeDirection::Up, Some(SnakeDirection::Down)) |
+            (SnakeDirection::Right, Some(SnakeDirection::Left)) |
+            (SnakeDirection::Down, Some(SnakeDirection::Up)) |
+            (SnakeDirection::Left, Some(SnakeDirection::Right)) => unreachable!(),
         }
     }
 }
@@ -155,24 +180,17 @@ impl Snake {
     }
 
     fn make_move(&mut self, constraints: (u32, u32), food: &mut Vec<Point>) {
-        let mut head = self.points.front_mut().unwrap();
-        if !self.direction.is_valid_move(&self.prev_direction) {
-            self.direction = self.prev_direction
-        }
-        let &mut (Point(mut x,mut y), _texture) = head;
+        self.direction.valid_move(&self.prev_direction);
+        let (Point(mut x,mut y), prev_texture) = self.points.front_mut().unwrap();
         match self.direction {
             SnakeDirection::Down => y = wrap_inc(y, constraints.1, &mut self.wrapped),
             SnakeDirection::Up => y = wrap_dec(y, constraints.1, &mut self.wrapped),
             SnakeDirection::Left => x = wrap_dec(x, constraints.0, &mut self.wrapped),
             SnakeDirection::Right => x = wrap_inc(x, constraints.0, &mut self.wrapped),
         };
-        let new_texture = match self.direction {
-            SnakeDirection::Down | SnakeDirection::Up => SnakeTexture::Vertical,
-            SnakeDirection::Left | SnakeDirection::Right => SnakeTexture::Horizontal,
-        };
 
-        head.1 = self.prev_direction.get_texture(&self.direction);
-        self.points.push_front((Point(x,y), new_texture));
+        *prev_texture = self.prev_direction.get_texture(&Some(self.direction));
+        self.points.push_front((Point(x,y), self.direction.get_texture(&None)));
         self.prev_direction = self.direction;
         if !self.detect_food_collision(food) {
             self.points.pop_back();
