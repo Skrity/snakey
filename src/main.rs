@@ -1,12 +1,30 @@
 use std::collections::VecDeque;
 use rand::{thread_rng, Rng};
 use std::env::args;
+use std::sync::mpsc;
+use std::thread;
+
 
 // TODO: spawn more food later on in the game
 // TODO: detect collision with whole body
 // TODO: fix food spawning inside snake
 
 fn main() {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            match getch() {
+                'w' => tx.send(SnakeDirection::Up).unwrap(),
+                'a' => tx.send(SnakeDirection::Left).unwrap(),
+                's' => tx.send(SnakeDirection::Down).unwrap(),
+                'd' => tx.send(SnakeDirection::Right).unwrap(),
+                'q' => std::process::exit(0),
+                x => {
+                    println!("Invalid input: {}", x);
+                }
+            }
+        }
+    });
     let cmdline: Vec<String> = args().collect();
     let mut x = match cmdline.len() {
         1 => {Field{size_x: 25, size_y: 10, ..Default::default()}},
@@ -20,28 +38,22 @@ fn main() {
     let mut iteration = 0;
     loop {
         iteration += 1;
-        let input = getch();
-        if x.snake.move_allowed(match input {
-            'w' => SnakeDirection::Up,
-            'a' => SnakeDirection::Left,
-            's' => SnakeDirection::Down,
-            'd' => SnakeDirection::Right,
-            x => {
-                println!("Invalid input: {}", x);
-                break;
-            }
-        }) {
+        if let Ok(dir) = rx.try_recv() {
+            x.snake.change_direction(dir);
+        }
+        if iteration % 10 == 0 {
             x.snake.make_move((x.size_x, x.size_y), &mut x.food);
-            if x.food.is_empty() { // Put new food if no left
-                x.food.push(x.find_place_for_food())
-            }
-            if iteration % 100 == 0 { // Put new food every 100 move
-                x.food.push(x.find_place_for_food())
-            }
             if x.snake.detect_self_collision() || (!x.wraps && x.snake.detect_wrapping()) { println!("Game over"); break }
-            if x.snake.points.len() == (x.size_x*x.size_y) as usize { println!("You win!"); break }
-        };
+        }
+        if x.snake.points.len() == (x.size_x*x.size_y) as usize { println!("You win!"); break }
+        if x.food.is_empty() { // Put new food if no left
+            x.food.push(x.find_place_for_food())
+        }
+        if iteration % 100 == 0 { // Put new food every 100 move
+            x.food.push(x.find_place_for_food())
+        }
         x.print();
+        thread::sleep(std::time::Duration::from_millis(10))
     };
 }
 
@@ -99,8 +111,8 @@ enum SnakeDirection {
 }
 
 impl SnakeDirection {
-    fn reverse_direction(&self) -> Self {
-        match self {
+    fn is_valid_move(&self, rhs: &Self) -> bool {
+        *rhs != match self {
             SnakeDirection::Up => SnakeDirection::Down,
             SnakeDirection::Down => SnakeDirection::Up,
             SnakeDirection::Left => SnakeDirection::Right,
@@ -138,17 +150,15 @@ impl Snake {
         me
     }
 
-    fn move_allowed(&mut self, direction: SnakeDirection) -> bool {
-        let res = direction.reverse_direction() != self.direction;
-        if res {
-            self.prev_direction = self.direction;
-            self.direction = direction;
-        }
-        res
+    fn change_direction(&mut self, direction: SnakeDirection) {
+        self.direction = direction;
     }
 
     fn make_move(&mut self, constraints: (u32, u32), food: &mut Vec<Point>) {
         let mut head = self.points.front_mut().unwrap();
+        if !self.direction.is_valid_move(&self.prev_direction) {
+            self.direction = self.prev_direction
+        }
         let &mut (Point(mut x,mut y), _texture) = head;
         match self.direction {
             SnakeDirection::Down => y = wrap_inc(y, constraints.1, &mut self.wrapped),
@@ -161,9 +171,9 @@ impl Snake {
             SnakeDirection::Left | SnakeDirection::Right => SnakeTexture::Horizontal,
         };
 
-        let res = (Point(x,y), new_texture);
         head.1 = self.prev_direction.get_texture(&self.direction);
-        self.points.push_front(res);
+        self.points.push_front((Point(x,y), new_texture));
+        self.prev_direction = self.direction;
         if !self.detect_food_collision(food) {
             self.points.pop_back();
         }
